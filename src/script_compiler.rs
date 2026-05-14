@@ -59,7 +59,7 @@ unsafe extern "C" {
     no_cache_reason: NoCacheReason,
   ) -> *const UnboundScript;
 
-  #[cfg(target_os = "linux")]
+  #[cfg(rusty_v8_compile_module_from_unbound)]
   fn v8__ScriptCompiler__CompileModuleFromUnbound(
     isolate: *mut RealIsolate,
     unbound_module_script: *const UnboundModuleScript,
@@ -285,16 +285,16 @@ pub fn compile_module_from_unbound<'s>(
   scope: &PinScope<'s, '_>,
   unbound_module_script: &UnboundModuleScript,
 ) -> Option<Local<'s, Module>> {
-  #[cfg(not(target_os = "linux"))]
+  #[cfg(not(rusty_v8_compile_module_from_unbound))]
   {
     let _ = (scope, unbound_module_script);
-    // Only Linux currently has a published Hotrod fork archive containing the
-    // extra C++ binding. Other platforms keep using the caller's source compile
-    // fallback until matching fork archives are available.
+    // The extra C++ binding is only available when the build is pointed at a
+    // matching fork archive. Keep using the caller's source compile fallback
+    // for ordinary upstream archives.
     None
   }
 
-  #[cfg(target_os = "linux")]
+  #[cfg(rusty_v8_compile_module_from_unbound)]
   unsafe {
     scope.cast_local(|sd| {
       v8__ScriptCompiler__CompileModuleFromUnbound(

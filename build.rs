@@ -39,6 +39,7 @@ fn main() {
     "NINJA",
     "OUT_DIR",
     "RUSTY_V8_ARCHIVE",
+    "RUSTY_V8_COMPILE_MODULE_FROM_UNBOUND",
     "RUSTY_V8_MIRROR",
     "RUSTY_V8_SRC_BINDING_PATH",
     "SCCACHE",
@@ -52,6 +53,10 @@ fn main() {
   ];
   for env in envs {
     println!("cargo:rerun-if-env-changed={env}");
+  }
+  println!("cargo:rustc-check-cfg=cfg(rusty_v8_compile_module_from_unbound)");
+  if env_bool("RUSTY_V8_COMPILE_MODULE_FROM_UNBOUND") {
+    println!("cargo:rustc-cfg=rusty_v8_compile_module_from_unbound");
   }
 
   // Detect if trybuild tests are being compiled.
