@@ -101,6 +101,15 @@ where
   }
 }
 
+// Index-based module resolution callback (raw function pointer).
+// V8's ResolveModuleByIndexCallback: MaybeLocal<Module>(*)(context, index, referrer)
+pub type ResolveModuleByIndexCallback =
+  unsafe extern "C" fn(
+    *const Context,
+    usize,
+    *const Module,
+  ) -> *const Module;
+
 // System V ABI.
 #[cfg(not(target_os = "windows"))]
 #[repr(C)]
@@ -235,6 +244,12 @@ unsafe extern "C" {
     context: *const Context,
     cb: ResolveModuleCallback,
     source_callback: Option<ResolveSourceCallback>,
+  ) -> MaybeBool;
+  fn v8__Module__InstantiateModuleByIndex(
+    this: *const Module,
+    context: *const Context,
+    cb: ResolveModuleByIndexCallback,
+    source_callback: *const (), // nullptr — not using source callback
   ) -> MaybeBool;
   fn v8__Module__Evaluate(
     this: *const Module,
@@ -462,6 +477,27 @@ impl Module {
         &*scope.get_current_context(),
         callback.map_fn_to(),
         Some(source_callback.map_fn_to()),
+      )
+    }
+    .into()
+  }
+
+  /// Instantiate using index-based resolution.
+  /// The callback receives a module_request_index (from GetModuleRequests)
+  /// instead of a specifier string. This skips specifier resolution overhead.
+  #[must_use]
+  #[inline(always)]
+  pub fn instantiate_module_by_index(
+    &self,
+    scope: &PinScope,
+    callback: ResolveModuleByIndexCallback,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Module__InstantiateModuleByIndex(
+        self,
+        &*scope.get_current_context(),
+        callback,
+        std::ptr::null(),
       )
     }
     .into()

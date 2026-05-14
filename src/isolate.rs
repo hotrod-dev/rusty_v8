@@ -1825,12 +1825,30 @@ impl Isolate {
   /// Panics if the isolate was not created using [`Isolate::snapshot_creator`]
   #[inline(always)]
   pub fn set_default_context(&mut self, context: Local<Context>) {
+    self.set_default_context_with_serializer(context, None);
+  }
+
+  /// Like [`Self::set_default_context`] but also installs a callback that is
+  /// invoked during `create_blob` to serialize embedder-owned internal fields
+  /// on wrapper objects in the snapshotted context. Required whenever the
+  /// context contains objects whose internal fields hold `v8::External`
+  /// pointers (for example native-backed DOM wrappers).
+  ///
+  /// # Panics
+  ///
+  /// Panics if the isolate was not created using [`Isolate::snapshot_creator`]
+  #[inline(always)]
+  pub fn set_default_context_with_serializer(
+    &mut self,
+    context: Local<Context>,
+    serializer: Option<crate::snapshot::SerializeInternalFieldsCallback>,
+  ) {
     let snapshot_creator = self
       .get_annex_mut()
       .maybe_snapshot_creator
       .as_mut()
       .unwrap();
-    snapshot_creator.set_default_context(context);
+    snapshot_creator.set_default_context(context, serializer);
   }
 
   /// Add additional context to be included in the snapshot blob.
@@ -1843,12 +1861,27 @@ impl Isolate {
   /// Panics if the isolate was not created using [`Isolate::snapshot_creator`]
   #[inline(always)]
   pub fn add_context(&mut self, context: Local<Context>) -> usize {
+    self.add_context_with_serializer(context, None)
+  }
+
+  /// Like [`Self::add_context`] but also installs an internal-fields
+  /// serialize callback scoped to the context being added.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the isolate was not created using [`Isolate::snapshot_creator`]
+  #[inline(always)]
+  pub fn add_context_with_serializer(
+    &mut self,
+    context: Local<Context>,
+    serializer: Option<crate::snapshot::SerializeInternalFieldsCallback>,
+  ) -> usize {
     let snapshot_creator = self
       .get_annex_mut()
       .maybe_snapshot_creator
       .as_mut()
       .unwrap();
-    snapshot_creator.add_context(context)
+    snapshot_creator.add_context(context, serializer)
   }
 
   /// Attach arbitrary `v8::Data` to the isolate snapshot, which can be

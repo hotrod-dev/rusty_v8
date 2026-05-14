@@ -24,6 +24,9 @@
 #include "v8.h"
 #include "v8/src/flags/flags.h"
 #include "v8/src/libplatform/default-platform.h"
+// Hotrod: V8 internals for CompileModuleFromUnbound.
+#include "v8/src/api/api-inl.h"
+#include "v8/src/objects/source-text-module.h"
 
 using namespace support;
 
@@ -627,6 +630,16 @@ const v8::Module* v8__ScriptCompiler__CompileModule(
   v8::MaybeLocal<v8::Module> maybe_local = v8::ScriptCompiler::CompileModule(
       isolate, source, options, no_cache_reason);
   return maybe_local_to_ptr(maybe_local);
+}
+
+const v8::Module* v8__ScriptCompiler__CompileModuleFromUnbound(
+    v8::Isolate* isolate,
+    const v8::UnboundModuleScript* unbound_module_script) {
+  auto shared = v8::Utils::OpenDirectHandle(
+      ptr_to_local(unbound_module_script).operator->());
+  auto* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  auto module = i_isolate->factory()->NewSourceTextModule(shared);
+  return local_to_ptr(v8::Utils::ToLocal(i::Cast<i::Module>(module)));
 }
 
 const v8::Script* v8__ScriptCompiler__Compile(
@@ -2093,35 +2106,80 @@ const v8::DataView* v8__DataView__New(const v8::ArrayBuffer& ab, size_t offset,
   return local_to_ptr(v8::DataView::New(ptr_to_local(&ab), offset, length));
 }
 
-struct InternalFieldData {
-  uint32_t data;
+// Rust-facing ABI for embedder internal-field serialization. The original
+// rusty_v8 binding hardcoded a dummy 4-byte InternalFieldData callback that
+// corrupted any embedder-owned v8::External pointers across a snapshot/restore
+// cycle. Embedders that snapshot native-backed wrapper objects need the V8
+// SerializeInternalFieldsCallback / DeserializeInternalFieldsCallback plumbed
+// through as real, embedder-chosen callbacks.
+struct RustyV8StartupData {
+  const uint8_t* data;
+  size_t len;
 };
 
-std::vector<InternalFieldData*> deserialized_data;
+typedef RustyV8StartupData (*RustyV8SerializeInternalFieldsFn)(
+    const v8::Object* holder, int index, void* data);
+typedef void (*RustyV8DeserializeInternalFieldsFn)(const v8::Object* holder,
+                                                   int index,
+                                                   const uint8_t* payload,
+                                                   size_t len, void* data);
 
-void DeserializeInternalFields(v8::Local<v8::Object> holder, int index,
-                               v8::StartupData payload, void* data) {
-  assert(data == nullptr);
-  if (payload.raw_size == 0) {
-    holder->SetAlignedPointerInInternalField(index, nullptr,
-                                             v8::kEmbedderDataTypeTagDefault);
-    return;
+// Implemented in Rust. Called by our serialize trampoline to hand back ownership
+// of the payload buffer the Rust callback allocated, after we have copied it
+// into V8-owned storage.
+extern "C" void rusty_v8__internal_field_payload_drop(const uint8_t* ptr,
+                                                      size_t len);
+
+struct RustySerializeBridge {
+  RustyV8SerializeInternalFieldsFn cb;
+  void* data;
+};
+
+struct RustyDeserializeBridge {
+  RustyV8DeserializeInternalFieldsFn cb;
+  void* data;
+};
+
+static v8::StartupData RustySerializeInternalFieldsTrampoline(
+    v8::Local<v8::Object> holder, int index, void* data) {
+  auto* bridge = static_cast<RustySerializeBridge*>(data);
+  RustyV8StartupData payload = bridge->cb(local_to_ptr(holder), index,
+                                          bridge->data);
+  if (payload.data == nullptr || payload.len == 0) {
+    return {nullptr, 0};
   }
-  InternalFieldData* embedder_field = new InternalFieldData{0};
-  memcpy(embedder_field, payload.data, payload.raw_size);
-  holder->SetAlignedPointerInInternalField(index, embedder_field,
-                                           v8::kEmbedderDataTypeTagDefault);
-  deserialized_data.push_back(embedder_field);
+  char* copy = new char[payload.len];
+  memcpy(copy, payload.data, payload.len);
+  rusty_v8__internal_field_payload_drop(payload.data, payload.len);
+  return {copy, static_cast<int>(payload.len)};
 }
 
-const v8::Context* v8__Context__New(v8::Isolate* isolate,
-                                    const v8::ObjectTemplate* templ,
-                                    const v8::Value* global_object,
-                                    v8::MicrotaskQueue* microtask_queue) {
+static void RustyDeserializeInternalFieldsTrampoline(
+    v8::Local<v8::Object> holder, int index, v8::StartupData payload,
+    void* data) {
+  auto* bridge = static_cast<RustyDeserializeBridge*>(data);
+  bridge->cb(local_to_ptr(holder), index,
+             reinterpret_cast<const uint8_t*>(payload.data),
+             static_cast<size_t>(payload.raw_size), bridge->data);
+}
+
+// V8 invokes the deserialize callback during Context::New. After that call
+// returns, the bridge is no longer needed. We allocate it on the heap here and
+// free it before returning — the callback does not escape the call.
+const v8::Context* v8__Context__New(
+    v8::Isolate* isolate, const v8::ObjectTemplate* templ,
+    const v8::Value* global_object, v8::MicrotaskQueue* microtask_queue,
+    RustyV8DeserializeInternalFieldsFn deserialize_cb,
+    void* deserialize_data) {
+  v8::DeserializeInternalFieldsCallback deserialize_callback;
+  RustyDeserializeBridge bridge{deserialize_cb, deserialize_data};
+  if (deserialize_cb != nullptr) {
+    deserialize_callback = v8::DeserializeInternalFieldsCallback(
+        RustyDeserializeInternalFieldsTrampoline, &bridge);
+  }
   return local_to_ptr(v8::Context::New(
       isolate, nullptr, ptr_to_maybe_local(templ),
-      ptr_to_maybe_local(global_object),
-      v8::DeserializeInternalFieldsCallback(DeserializeInternalFields, nullptr),
+      ptr_to_maybe_local(global_object), deserialize_callback,
       microtask_queue));
 }
 
@@ -2217,11 +2275,18 @@ void v8__Context__SetMicrotaskQueue(v8::Context& self,
 
 const v8::Context* v8__Context__FromSnapshot(
     v8::Isolate* isolate, size_t context_snapshot_index,
-    v8::Value* global_object, v8::MicrotaskQueue* microtask_queue) {
+    v8::Value* global_object, v8::MicrotaskQueue* microtask_queue,
+    RustyV8DeserializeInternalFieldsFn deserialize_cb,
+    void* deserialize_data) {
+  v8::DeserializeInternalFieldsCallback deserialize_callback;
+  RustyDeserializeBridge bridge{deserialize_cb, deserialize_data};
+  if (deserialize_cb != nullptr) {
+    deserialize_callback = v8::DeserializeInternalFieldsCallback(
+        RustyDeserializeInternalFieldsTrampoline, &bridge);
+  }
   v8::MaybeLocal<v8::Context> maybe_local = v8::Context::FromSnapshot(
-      isolate, context_snapshot_index,
-      v8::DeserializeInternalFieldsCallback(DeserializeInternalFields, nullptr),
-      nullptr, ptr_to_maybe_local(global_object), microtask_queue);
+      isolate, context_snapshot_index, deserialize_callback, nullptr,
+      ptr_to_maybe_local(global_object), microtask_queue);
   return maybe_local_to_ptr(maybe_local);
 }
 
@@ -3018,28 +3083,33 @@ v8::Isolate* v8__SnapshotCreator__GetIsolate(const v8::SnapshotCreator& self) {
   return self_ptr->GetIsolate();
 }
 
-v8::StartupData SerializeInternalFields(v8::Local<v8::Object> holder, int index,
-                                        void* data) {
-  assert(data == nullptr);
-  InternalFieldData* embedder_field = static_cast<InternalFieldData*>(
-      holder->GetAlignedPointerFromInternalField(
-          index, v8::kEmbedderDataTypeTagDefault));
-  if (embedder_field == nullptr) return {nullptr, 0};
-  int size = sizeof(*embedder_field);
-  char* payload = new char[size];
-  // We simply use memcpy to serialize the content.
-  memcpy(payload, embedder_field, size);
-  return {payload, size};
+// V8 stores the serialize callback + data inside the SnapshotCreator and
+// invokes it later during CreateBlob(), so the bridge must outlive this call.
+// We heap-allocate and deliberately leak — the SnapshotCreator is a one-off
+// per process, and Rust retains the raw pointer through its wrapper anyway
+// (see snapshot.rs) so leaks here are bounded.
+void v8__SnapshotCreator__SetDefaultContext(
+    v8::SnapshotCreator* self, const v8::Context& context,
+    RustyV8SerializeInternalFieldsFn serialize_cb, void* serialize_data) {
+  v8::SerializeInternalFieldsCallback callback;
+  if (serialize_cb != nullptr) {
+    auto* bridge = new RustySerializeBridge{serialize_cb, serialize_data};
+    callback = v8::SerializeInternalFieldsCallback(
+        RustySerializeInternalFieldsTrampoline, bridge);
+  }
+  self->SetDefaultContext(ptr_to_local(&context), callback);
 }
 
-void v8__SnapshotCreator__SetDefaultContext(v8::SnapshotCreator* self,
-                                            const v8::Context& context) {
-  self->SetDefaultContext(ptr_to_local(&context), SerializeInternalFields);
-}
-
-size_t v8__SnapshotCreator__AddContext(v8::SnapshotCreator* self,
-                                       const v8::Context& context) {
-  return self->AddContext(ptr_to_local(&context), SerializeInternalFields);
+size_t v8__SnapshotCreator__AddContext(
+    v8::SnapshotCreator* self, const v8::Context& context,
+    RustyV8SerializeInternalFieldsFn serialize_cb, void* serialize_data) {
+  v8::SerializeInternalFieldsCallback callback;
+  if (serialize_cb != nullptr) {
+    auto* bridge = new RustySerializeBridge{serialize_cb, serialize_data};
+    callback = v8::SerializeInternalFieldsCallback(
+        RustySerializeInternalFieldsTrampoline, bridge);
+  }
+  return self->AddContext(ptr_to_local(&context), callback);
 }
 
 size_t v8__SnapshotCreator__AddData_to_isolate(v8::SnapshotCreator* self,
@@ -3627,6 +3697,34 @@ MaybeBool v8__Module__InstantiateModule(
     v8::Module::ResolveSourceCallback source_callback) {
   return maybe_to_maybe_bool(ptr_to_local(&self)->InstantiateModule(
       ptr_to_local(&context), cb, source_callback));
+}
+
+// Index-based InstantiateModule.
+// Rust passes a C-compatible callback; we wrap it to match V8's expected type.
+using RustResolveByIndexFn = const v8::Module* (*)(
+    const v8::Context*, size_t, const v8::Module*);
+
+static thread_local RustResolveByIndexFn g_rust_resolve_by_index_fn = nullptr;
+
+static v8::MaybeLocal<v8::Module> resolve_by_index_trampoline(
+    v8::Local<v8::Context> context, size_t index,
+    v8::Local<v8::Module> referrer) {
+  if (!g_rust_resolve_by_index_fn) return {};
+  const v8::Module* result = g_rust_resolve_by_index_fn(
+      local_to_ptr(context), index, local_to_ptr(referrer));
+  if (!result) return {};
+  return ptr_to_local(result);
+}
+
+MaybeBool v8__Module__InstantiateModuleByIndex(
+    const v8::Module& self, const v8::Context& context,
+    RustResolveByIndexFn cb,
+    const void* /*source_callback_unused*/) {
+  g_rust_resolve_by_index_fn = cb;
+  auto result = maybe_to_maybe_bool(ptr_to_local(&self)->InstantiateModule(
+      ptr_to_local(&context), resolve_by_index_trampoline, nullptr));
+  g_rust_resolve_by_index_fn = nullptr;
+  return result;
 }
 
 const v8::Value* v8__Module__Evaluate(const v8::Module& self,

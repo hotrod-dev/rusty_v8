@@ -1,6 +1,7 @@
 use crate::Context;
 use crate::Data;
 use crate::Local;
+use crate::Object;
 use crate::OwnedIsolate;
 use crate::external_references::ExternalReference;
 use crate::isolate::RealIsolate;
@@ -9,7 +10,9 @@ use crate::support::char;
 use crate::support::int;
 
 use std::borrow::Cow;
+use std::ffi::c_void;
 use std::mem::MaybeUninit;
+use std::ptr::null_mut;
 
 unsafe extern "C" {
   fn v8__SnapshotCreator__CONSTRUCT(
@@ -27,10 +30,14 @@ unsafe extern "C" {
   fn v8__SnapshotCreator__SetDefaultContext(
     this: *mut SnapshotCreator,
     context: *const Context,
+    serialize_cb: Option<RawSerializeInternalFieldsFn>,
+    serialize_data: *mut c_void,
   );
   fn v8__SnapshotCreator__AddContext(
     this: *mut SnapshotCreator,
     context: *const Context,
+    serialize_cb: Option<RawSerializeInternalFieldsFn>,
+    serialize_data: *mut c_void,
   ) -> usize;
   fn v8__SnapshotCreator__AddData_to_isolate(
     this: *mut SnapshotCreator,
@@ -44,6 +51,97 @@ unsafe extern "C" {
   fn v8__StartupData__CanBeRehashed(this: *const RawStartupData) -> bool;
   fn v8__StartupData__IsValid(this: *const RawStartupData) -> bool;
   fn v8__StartupData__data__DELETE(this: *const char);
+}
+
+/// Payload returned by a [`SerializeInternalFieldsCallback`]. The pointer must
+/// reference a heap allocation that Rust owns — the C++ trampoline copies the
+/// bytes into V8-owned storage and then calls [`__internal_field_payload_drop`]
+/// to return ownership to Rust for deallocation.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct InternalFieldsPayload {
+  pub data: *const u8,
+  pub len: usize,
+}
+
+impl InternalFieldsPayload {
+  pub const EMPTY: Self = Self {
+    data: std::ptr::null(),
+    len: 0,
+  };
+
+  /// Take ownership of `buf`, leaking it into a raw payload. The consumer (the
+  /// serialize trampoline) is responsible for calling
+  /// [`__internal_field_payload_drop`] with the returned pointer and length.
+  pub fn from_vec(buf: Vec<u8>) -> Self {
+    if buf.is_empty() {
+      return Self::EMPTY;
+    }
+    let slice: Box<[u8]> = buf.into_boxed_slice();
+    let len = slice.len();
+    let data = Box::into_raw(slice) as *const u8;
+    Self { data, len }
+  }
+}
+
+/// Raw C ABI for the serialize callback. Implementers should prefer the
+/// safe-ish [`SerializeInternalFieldsCallback`] wrapper which handles bridge
+/// construction and data ownership.
+pub type RawSerializeInternalFieldsFn = unsafe extern "C" fn(
+  holder: *const Object,
+  index: i32,
+  data: *mut c_void,
+) -> InternalFieldsPayload;
+
+/// Raw C ABI for the deserialize callback.
+pub type RawDeserializeInternalFieldsFn = unsafe extern "C" fn(
+  holder: *const Object,
+  index: i32,
+  payload: *const u8,
+  len: usize,
+  data: *mut c_void,
+);
+
+/// Callback + opaque data pointer pair used when building a snapshot to
+/// serialize embedder-owned internal fields on wrapper objects. Pass to
+/// [`OwnedIsolate::set_default_context_with_serializer`] or
+/// [`OwnedIsolate::add_context_with_serializer`].
+#[derive(Copy, Clone, Debug)]
+pub struct SerializeInternalFieldsCallback {
+  pub callback: RawSerializeInternalFieldsFn,
+  pub data: *mut c_void,
+}
+
+/// Callback + opaque data pointer pair used when restoring a context from a
+/// snapshot to deserialize the internal-field payloads that were written by a
+/// matching [`SerializeInternalFieldsCallback`]. Pass via
+/// [`ContextOptions::deserialize_internal_fields`].
+#[derive(Copy, Clone, Debug)]
+pub struct DeserializeInternalFieldsCallback {
+  pub callback: RawDeserializeInternalFieldsFn,
+  pub data: *mut c_void,
+}
+
+/// Called by the C++ serialize trampoline after it has copied the payload
+/// bytes into V8-owned storage, to return ownership of the original buffer to
+/// Rust so it can be deallocated.
+///
+/// # Safety
+///
+/// `ptr` must have come from [`InternalFieldsPayload::from_vec`]; `len` must
+/// match.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rusty_v8__internal_field_payload_drop(
+  ptr: *const u8,
+  len: usize,
+) {
+  if ptr.is_null() || len == 0 {
+    return;
+  }
+  unsafe {
+    let slice = std::slice::from_raw_parts_mut(ptr as *mut u8, len);
+    drop(Box::from_raw(slice as *mut [u8]));
+  }
 }
 
 #[repr(C)]
@@ -218,8 +316,18 @@ impl SnapshotCreator {
   /// The snapshot will not contain the global proxy, and we expect one or a
   /// global object template to create one, to be provided upon deserialization.
   #[inline(always)]
-  pub(crate) fn set_default_context(&mut self, context: Local<Context>) {
-    unsafe { v8__SnapshotCreator__SetDefaultContext(self, &*context) };
+  pub(crate) fn set_default_context(
+    &mut self,
+    context: Local<Context>,
+    serializer: Option<SerializeInternalFieldsCallback>,
+  ) {
+    let (cb, data) = match serializer {
+      Some(s) => (Some(s.callback), s.data),
+      None => (None, null_mut()),
+    };
+    unsafe {
+      v8__SnapshotCreator__SetDefaultContext(self, &*context, cb, data)
+    };
   }
 
   /// Add additional context to be included in the snapshot blob.
@@ -227,8 +335,16 @@ impl SnapshotCreator {
   ///
   /// Returns the index of the context in the snapshot blob.
   #[inline(always)]
-  pub(crate) fn add_context(&mut self, context: Local<Context>) -> usize {
-    unsafe { v8__SnapshotCreator__AddContext(self, &*context) }
+  pub(crate) fn add_context(
+    &mut self,
+    context: Local<Context>,
+    serializer: Option<SerializeInternalFieldsCallback>,
+  ) -> usize {
+    let (cb, data) = match serializer {
+      Some(s) => (Some(s.callback), s.data),
+      None => (None, null_mut()),
+    };
+    unsafe { v8__SnapshotCreator__AddContext(self, &*context, cb, data) }
   }
 
   /// Attach arbitrary `v8::Data` to the isolate snapshot, which can be

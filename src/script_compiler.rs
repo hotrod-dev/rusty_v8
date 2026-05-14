@@ -7,6 +7,7 @@ use crate::Module;
 use crate::Object;
 use crate::ScriptOrigin;
 use crate::String;
+use crate::UnboundModuleScript;
 use crate::UniqueRef;
 use crate::isolate::RealIsolate;
 use crate::scope::PinScope;
@@ -57,6 +58,11 @@ unsafe extern "C" {
     options: CompileOptions,
     no_cache_reason: NoCacheReason,
   ) -> *const UnboundScript;
+
+  fn v8__ScriptCompiler__CompileModuleFromUnbound(
+    isolate: *mut RealIsolate,
+    unbound_module_script: *const UnboundModuleScript,
+  ) -> *const Module;
 
   fn v8__ScriptCompiler__CachedDataVersionTag() -> u32;
 }
@@ -265,6 +271,24 @@ pub fn compile_module2<'s>(
         source,
         options,
         no_cache_reason,
+      )
+    })
+  }
+}
+
+/// Create a Module from an UnboundModuleScript without recompiling.
+/// This allows sharing compiled module code across contexts within
+/// the same isolate — compile once, instantiate/evaluate in each context.
+#[inline(always)]
+pub fn compile_module_from_unbound<'s>(
+  scope: &PinScope<'s, '_>,
+  unbound_module_script: &UnboundModuleScript,
+) -> Option<Local<'s, Module>> {
+  unsafe {
+    scope.cast_local(|sd| {
+      v8__ScriptCompiler__CompileModuleFromUnbound(
+        sd.get_isolate_ptr(),
+        unbound_module_script,
       )
     })
   }

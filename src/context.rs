@@ -24,6 +24,8 @@ unsafe extern "C" {
     templ: *const ObjectTemplate,
     global_object: *const Value,
     microtask_queue: *mut MicrotaskQueue,
+    deserialize_cb: Option<crate::snapshot::RawDeserializeInternalFieldsFn>,
+    deserialize_data: *mut c_void,
   ) -> *const Context;
   fn v8__Isolate__GetCurrent() -> *mut RealIsolate;
   fn v8__Context__Global(this: *const Context) -> *const Object;
@@ -53,6 +55,8 @@ unsafe extern "C" {
     context_snapshot_index: usize,
     global_object: *const Value,
     microtask_queue: *mut MicrotaskQueue,
+    deserialize_cb: Option<crate::snapshot::RawDeserializeInternalFieldsFn>,
+    deserialize_data: *mut c_void,
   ) -> *const Context;
   pub(super) fn v8__Context__GetSecurityToken(
     this: *const Context,
@@ -91,6 +95,14 @@ pub struct ContextOptions<'s> {
   /// An optional microtask queue used to manage the microtasks created in this context. If not
   /// set the per-isolate default microtask queue would be used.
   pub microtask_queue: Option<*mut MicrotaskQueue>,
+  /// Optional callback invoked by V8 during context deserialization to let the
+  /// embedder restore native-backed internal fields (matches V8's
+  /// `DeserializeInternalFieldsCallback`). The callback is used when the
+  /// isolate was created with a `snapshot_blob` that contains payloads emitted
+  /// by a matching serialize callback. Leave `None` when not deserializing, or
+  /// when internal-field payloads can be ignored.
+  pub deserialize_internal_fields:
+    Option<crate::snapshot::DeserializeInternalFieldsCallback>,
 }
 
 impl Context {
@@ -103,6 +115,12 @@ impl Context {
     scope: &PinScope<'s, '_, ()>,
     options: ContextOptions,
   ) -> Local<'s, Context> {
+    let (deserialize_cb, deserialize_data) = options
+      .deserialize_internal_fields
+      .as_ref()
+      .map_or((None, null_mut()), |cb| {
+        (Some(cb.callback), cb.data)
+      });
     unsafe {
       scope.cast_local(|sd| {
         v8__Context__New(
@@ -112,6 +130,8 @@ impl Context {
             .map_or_else(null, |t| &*t as *const _),
           options.global_object.map_or_else(null, |o| &*o as *const _),
           options.microtask_queue.unwrap_or_else(null_mut),
+          deserialize_cb,
+          deserialize_data,
         )
       })
     }
@@ -382,6 +402,12 @@ impl Context {
     context_snapshot_index: usize,
     options: ContextOptions,
   ) -> Option<Local<'s, Context>> {
+    let (deserialize_cb, deserialize_data) = options
+      .deserialize_internal_fields
+      .as_ref()
+      .map_or((None, null_mut()), |cb| {
+        (Some(cb.callback), cb.data)
+      });
     unsafe {
       scope.cast_local(|sd| {
         v8__Context__FromSnapshot(
@@ -389,6 +415,8 @@ impl Context {
           context_snapshot_index,
           options.global_object.map_or_else(null, |o| &*o as *const _),
           options.microtask_queue.unwrap_or_else(null_mut),
+          deserialize_cb,
+          deserialize_data,
         )
       })
     }
