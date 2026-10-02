@@ -46,6 +46,11 @@ fn clang_resource_dir(clang_bin: &Path) -> Result<String, String> {
 }
 
 fn main() {
+  println!("cargo:rustc-check-cfg=cfg(rusty_v8_compile_module_from_unbound)");
+  println!("cargo:rerun-if-env-changed=RUSTY_V8_COMPILE_MODULE_FROM_UNBOUND");
+  if env_bool("RUSTY_V8_COMPILE_MODULE_FROM_UNBOUND") {
+    println!("cargo:rustc-cfg=rusty_v8_compile_module_from_unbound");
+  }
   println!("cargo:rerun-if-changed=.gn");
   println!("cargo:rerun-if-changed=BUILD.gn");
   println!("cargo:rerun-if-changed=src/binding.cc");

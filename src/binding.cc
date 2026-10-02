@@ -29,6 +29,8 @@
 #include "v8.h"
 #include "v8/src/flags/flags.h"
 #include "v8/src/libplatform/default-platform.h"
+#include "v8/src/api/api-inl.h"
+#include "v8/src/objects/source-text-module.h"
 
 using namespace support;
 
@@ -670,6 +672,16 @@ const v8::Module* v8__ScriptCompiler__CompileModule(
   v8::MaybeLocal<v8::Module> maybe_local = v8::ScriptCompiler::CompileModule(
       isolate, source, options, no_cache_reason);
   return maybe_local_to_ptr(maybe_local);
+}
+
+const v8::Module* v8__ScriptCompiler__CompileModuleFromUnbound(
+    v8::Isolate* isolate,
+    const v8::UnboundModuleScript* unbound_module_script) {
+  auto shared = v8::Utils::OpenDirectHandle(
+      ptr_to_local(unbound_module_script).operator->());
+  auto* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  auto module = i_isolate->factory()->NewSourceTextModule(shared);
+  return local_to_ptr(v8::Utils::ToLocal(i::Cast<i::Module>(module)));
 }
 
 const v8::Script* v8__ScriptCompiler__Compile(

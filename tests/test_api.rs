@@ -10730,6 +10730,60 @@ fn unbound_module_script_conversion() {
   create_unbound_module_script(&mut scope, "'Hello ' + value", None);
 }
 
+#[cfg(rusty_v8_compile_module_from_unbound)]
+#[test]
+fn unbound_module_rebinding_keeps_context_and_module_state_separate() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let first_context = v8::Context::new(scope, Default::default());
+  let unbound = {
+    let scope = &mut v8::ContextScope::new(scope, first_context);
+    create_unbound_module_script(
+      scope,
+      "globalThis.runs = (globalThis.runs || 0) + 1; export let value = globalThis.runs;",
+      None,
+    )
+  };
+  for expected in [1, 2] {
+    let scope = &mut v8::ContextScope::new(scope, first_context);
+    let module =
+      v8::script_compiler::compile_module_from_unbound(scope, &unbound)
+        .unwrap();
+    assert_eq!(module.get_status(), v8::ModuleStatus::Uninstantiated);
+    assert!(
+      module
+        .instantiate_module(scope, unexpected_module_resolve_callback)
+        .unwrap()
+    );
+    module.evaluate(scope).unwrap();
+    let namespace =
+      v8::Local::<v8::Object>::try_from(module.get_module_namespace()).unwrap();
+    let key = v8::String::new(scope, "value").unwrap();
+    assert_eq!(
+      namespace
+        .get(scope, key.into())
+        .unwrap()
+        .integer_value(scope),
+      Some(expected)
+    );
+  }
+  let other_context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, other_context);
+  let module =
+    v8::script_compiler::compile_module_from_unbound(scope, &unbound).unwrap();
+  assert!(
+    module
+      .instantiate_module(scope, unexpected_module_resolve_callback)
+      .unwrap()
+  );
+  module.evaluate(scope).unwrap();
+  assert_eq!(
+    eval(scope, "globalThis.runs").unwrap().integer_value(scope),
+    Some(1)
+  );
+}
+
 #[test]
 fn cached_data_version_tag() {
   let _setup_guard = setup::sequential_test();
