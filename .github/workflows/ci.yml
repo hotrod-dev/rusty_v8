@@ -194,7 +194,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 10
-          submodules: recursive
+
+      - name: Initialize native source dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
 
       - name: Download tools/win
         if: runner.os == 'Windows'
@@ -454,7 +456,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 10
-          submodules: recursive
+
+      - name: Initialize native source dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
 
       - name: Install rust
         uses: dsherret/rust-toolchain-file@v1
@@ -542,7 +546,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 10
-          submodules: recursive
+
+      - name: Initialize native source dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
 
       - name: Download tools/win
         shell: bash
@@ -645,7 +651,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 10
-          submodules: recursive
+
+      - name: Initialize native source dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
 
       - uses: dsherret/rust-toolchain-file@v1
 
@@ -675,7 +683,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 10
-          submodules: recursive
+
+      - name: Initialize native source dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
 
       - name: Download tools/win
         shell: bash
