@@ -311,6 +311,13 @@ pub fn compile_module_from_unbound<'s>(
   }
 }
 
+/// Whether this build enables the native module feedback extension.
+/// A matching fork archive is required when RUSTY_V8_MODULE_FEEDBACK=1.
+#[inline]
+pub const fn module_feedback_supported() -> bool {
+  cfg!(rusty_v8_module_feedback)
+}
+
 /// Capture feedback after module instantiation. The token is isolate-bound and
 /// usable only with the same script and native context. Returns None when no
 /// reusable feedback exists, or when the native archive lacks this extension.
