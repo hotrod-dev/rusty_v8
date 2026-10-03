@@ -1,0 +1,84 @@
+name: Hotrod native archives
+
+on:
+  push:
+    branches: [hotrod-v152.2-native]
+    paths:
+      - '.github/workflows/hotrod-native.yml'
+      - 'src/**'
+      - 'build.rs'
+      - 'BUILD.gn'
+      - '.gitmodules'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.variant }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, multiple-cages]
+    env:
+      V8_FROM_SOURCE: '1'
+      RUSTY_V8_COMPILE_MODULE_FROM_UNBOUND: '1'
+      RUSTY_V8_MULTIPLE_ISOLATE_GROUPS: ${{ matrix.variant == 'multiple-cages' && '1' || '0' }}
+      GN_ARGS: ${{ matrix.variant == 'multiple-cages' && 'v8_enable_pointer_compression_shared_cage=false v8_enable_external_code_space=true' || '' }}
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize pinned native dependencies
+        run: git submodule update --init --recursive --checkout --depth 1
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install libclang
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/llvm-snapshot.gpg >/dev/null
+          echo 'deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-21 main' | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y libclang-21-dev
+          echo 'LIBCLANG_PATH=/usr/lib/llvm-21/lib' >> "$GITHUB_ENV"
+      - name: Build and test native API
+        shell: bash
+        run: |
+          args=()
+          if [[ '${{ matrix.variant }}' == 'multiple-cages' ]]; then
+            args+=(--features v8_enable_pointer_compression)
+          fi
+          cargo fmt --all -- --check
+          cargo test --release --locked --test test_api -j 2 "${args[@]}"
+          cargo clippy --release --locked --lib --test test_api -j 2 "${args[@]}" -- -D warnings
+      - name: Package matching archive and bindings
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          gzip -c target/release/gn_out/obj/librusty_v8.a > artifacts/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
+          cp target/release/gn_out/src_binding.rs artifacts/src_binding_release_x86_64-unknown-linux-gnu.rs
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          files = pathlib.Path('artifacts')
+          provenance = {
+              'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'variant': '${{ matrix.variant }}',
+              'target': 'x86_64-unknown-linux-gnu',
+              'gn_args': os.environ['GN_ARGS'],
+              'native_module_reuse': True,
+              'multiple_isolate_groups': os.environ['RUSTY_V8_MULTIPLE_ISOLATE_GROUPS'] == '1',
+              'artifacts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files.iterdir()},
+          }
+          (files / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusty-v8-152.2.0-linux-${{ matrix.variant }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
