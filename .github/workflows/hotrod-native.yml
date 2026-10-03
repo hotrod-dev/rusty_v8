@@ -37,7 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Initialize pinned native dependencies
-        run: git submodule update --init --recursive --checkout --depth 1
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if git submodule update --init --recursive --checkout --depth 1; then
+              exit 0
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep 15
+          done
       - uses: dsherret/rust-toolchain-file@v1
       - uses: actions/setup-python@v5
         with:
