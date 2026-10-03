@@ -10784,6 +10784,244 @@ fn unbound_module_rebinding_keeps_context_and_module_state_separate() {
   );
 }
 
+#[cfg(rusty_v8_module_feedback)]
+#[test]
+fn module_feedback_rebinding_keeps_closures_and_contexts_separate() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let first_context = v8::Context::new(scope, Default::default());
+  let unbound = {
+    let scope = &mut v8::ContextScope::new(scope, first_context);
+    create_unbound_module_script(
+      scope,
+      r#"
+      let count = 0;
+      const state = { factor: globalThis.factor };
+      export function hot(items) {
+        let result = 0;
+        for (let i = 0; i < items.length; i++) result += items[i].amount;
+        count++;
+        return result * state.factor + globalThis.bias;
+      }
+      export function calls() { return count; }
+    "#,
+      None,
+    )
+  };
+  let mut feedback: Option<v8::Local<v8::ModuleFeedback>> = None;
+  // Both same-context and cross-context rebinding exercise warmed optimized
+  // closures. Old exported functions must retain their original module state.
+  for generation in 1..=8 {
+    let context = if generation <= 5 {
+      first_context
+    } else {
+      v8::Context::new(scope, Default::default())
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
+    eval(scope, &format!("globalThis.factor = {generation}; globalThis.bias = {generation} * 1000")).unwrap();
+    let module =
+      v8::script_compiler::compile_module_from_unbound(scope, &unbound)
+        .unwrap();
+    let entries: Vec<_> = feedback
+      .iter()
+      .map(|token| v8::ModuleFeedbackEntry {
+        module,
+        feedback: *token,
+      })
+      .collect();
+    assert!(
+      v8::script_compiler::capture_module_feedback(scope, &module).is_none()
+    );
+    assert_eq!(
+      module.instantiate_module_with_feedback(
+        scope,
+        unexpected_module_resolve_callback,
+        &entries
+      ),
+      Some(true)
+    );
+    if feedback.is_none() {
+      feedback = Some(
+        v8::script_compiler::capture_module_feedback(scope, &module).unwrap(),
+      );
+    }
+    module.evaluate(scope).unwrap();
+    let namespace = module.get_module_namespace();
+    let key = v8::String::new(scope, "current").unwrap();
+    context
+      .global(scope)
+      .set(scope, key.into(), namespace)
+      .unwrap();
+    let result = eval(scope, &format!(r#"
+      (() => {{
+        if (current.calls() !== 0) throw Error('module state leaked');
+        if (globalThis.previous && previous.hot === current.hot) throw Error('closure reused');
+        const items = [{{amount: 2}}, {{amount: 3}}];
+        for (let i = 0; i < 30000; i++) {{
+          if (current.hot(items) !== 1005 * {generation}) throw Error('wrong closure context');
+        }}
+        if (current.calls() !== 30000) throw Error('wrong call count');
+        if (globalThis.previous) {{
+          if (previous.hot(items) !== 5 * ({generation} - 1) + 1000 * {generation}) throw Error('old closure changed');
+          if (previous.calls() !== 30001) throw Error('old state changed');
+        }}
+        globalThis.previous = current;
+        return true;
+      }})()
+    "#)).unwrap();
+    assert!(result.is_true());
+    scope.low_memory_notification();
+  }
+  // Compilation itself is context-independent. Check again when a module is
+  // instantiated after its caller has entered a different native context.
+  let delayed = {
+    let scope = &mut v8::ContextScope::new(scope, first_context);
+    v8::script_compiler::compile_module_from_unbound(scope, &unbound).unwrap()
+  };
+  let delayed_context = v8::Context::new(scope, Default::default());
+  {
+    let scope = &mut v8::ContextScope::new(scope, delayed_context);
+    eval(scope, "globalThis.factor = 9; globalThis.bias = 9000").unwrap();
+    assert_eq!(
+      delayed.instantiate_module_with_feedback(
+        scope,
+        unexpected_module_resolve_callback,
+        &[v8::ModuleFeedbackEntry {
+          module: delayed,
+          feedback: feedback.unwrap()
+        }]
+      ),
+      Some(true)
+    );
+    delayed.evaluate(scope).unwrap();
+    let key = v8::String::new(scope, "current").unwrap();
+    delayed_context
+      .global(scope)
+      .set(scope, key.into(), delayed.get_module_namespace())
+      .unwrap();
+    assert_eq!(
+      eval(scope, "current.hot([{amount: 1}])")
+        .unwrap()
+        .integer_value(scope),
+      Some(9009)
+    );
+  }
+  // A token for a different script must be ignored, even in the same context.
+  let scope = &mut v8::ContextScope::new(scope, first_context);
+  let other = create_unbound_module_script(
+    scope,
+    "export function hot() { return 4321; }",
+    None,
+  );
+  let module =
+    v8::script_compiler::compile_module_from_unbound(scope, &other).unwrap();
+  assert_eq!(
+    module.instantiate_module_with_feedback(
+      scope,
+      unexpected_module_resolve_callback,
+      &[v8::ModuleFeedbackEntry {
+        module,
+        feedback: feedback.unwrap()
+      }]
+    ),
+    Some(true)
+  );
+  module.evaluate(scope).unwrap();
+  let key = v8::String::new(scope, "current").unwrap();
+  first_context
+    .global(scope)
+    .set(scope, key.into(), module.get_module_namespace())
+    .unwrap();
+  assert_eq!(
+    eval(scope, "current.hot()").unwrap().integer_value(scope),
+    Some(4321)
+  );
+}
+
+#[cfg(rusty_v8_module_feedback)]
+#[test]
+fn module_feedback_does_not_root_old_module_namespace() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  let (context, unbound, feedback, namespace) = {
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let unbound = create_unbound_module_script(
+      scope,
+      "const state = { count: 0 }; export function next() { return ++state.count; }",
+      None,
+    );
+    let module =
+      v8::script_compiler::compile_module_from_unbound(scope, &unbound)
+        .unwrap();
+    assert_eq!(
+      module.instantiate_module(scope, unexpected_module_resolve_callback),
+      Some(true)
+    );
+    module.evaluate(scope).unwrap();
+    let namespace =
+      v8::Local::<v8::Object>::try_from(module.get_module_namespace()).unwrap();
+    let key = v8::String::new(scope, "next").unwrap();
+    let next = v8::Local::<v8::Function>::try_from(
+      namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let receiver = v8::undefined(scope);
+    for _ in 0..30000 {
+      next.call(scope, receiver.into(), &[]).unwrap();
+    }
+    // Background optimisation owns temporary handles to the function/context.
+    // Finish those jobs before testing whether the retained token is a root.
+    eval(
+      scope,
+      "%WaitForBackgroundOptimization(); %FinalizeOptimization();",
+    )
+    .unwrap();
+    let feedback =
+      v8::script_compiler::capture_module_feedback(scope, &module).unwrap();
+    (
+      v8::Global::new(scope, context),
+      v8::Global::new(scope, unbound),
+      v8::Global::new(scope, feedback),
+      v8::Weak::new(scope, module.get_module_namespace()),
+    )
+  };
+  // Background optimisation has finished, so temporary compiler handles no
+  // longer obscure whether the feedback token itself retains the namespace.
+  isolate.take_heap_snapshot(|_| true);
+  assert!(
+    namespace.is_empty(),
+    "feedback retained the old module namespace"
+  );
+  v8::scope!(let scope, isolate);
+  let context = v8::Local::new(scope, &context);
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let unbound = v8::Local::new(scope, &unbound);
+  let feedback = v8::Local::new(scope, &feedback);
+  let module =
+    v8::script_compiler::compile_module_from_unbound(scope, &unbound).unwrap();
+  assert_eq!(
+    module.instantiate_module_with_feedback(
+      scope,
+      unexpected_module_resolve_callback,
+      &[v8::ModuleFeedbackEntry { module, feedback }]
+    ),
+    Some(true)
+  );
+  module.evaluate(scope).unwrap();
+  let key = v8::String::new(scope, "current").unwrap();
+  context
+    .global(scope)
+    .set(scope, key.into(), module.get_module_namespace())
+    .unwrap();
+  assert_eq!(
+    eval(scope, "current.next()").unwrap().integer_value(scope),
+    Some(1)
+  );
+}
+
 #[test]
 fn cached_data_version_tag() {
   let _setup_guard = setup::sequential_test();
@@ -16236,4 +16474,140 @@ fn isolate_in_new_group() {
       });
     }
   });
+}
+
+#[cfg(rusty_v8_module_feedback)]
+#[test]
+fn module_feedback_hook_restores_nested_linking_and_errors() {
+  struct Modules {
+    root: v8::Global<v8::Module>,
+    dep: v8::Global<v8::Module>,
+    fail: bool,
+  }
+  fn resolve<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _: v8::Local<'s, v8::FixedArray>,
+    _: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    v8::callback_scope!(unsafe scope, context);
+    let name = specifier.to_rust_string_lossy(scope);
+    let (fail, result) = {
+      let modules = scope.get_slot::<Modules>().unwrap();
+      (
+        modules.fail,
+        v8::Local::new(
+          scope,
+          if name == "dep" {
+            &modules.dep
+          } else {
+            &modules.root
+          },
+        ),
+      )
+    };
+    // Nested instantiation installs its own empty provider, then restores the
+    // outer provider before linking continues through the cyclic graph.
+    let inner =
+      create_unbound_module_script(scope, "export const value = 42;", None);
+    let inner =
+      v8::script_compiler::compile_module_from_unbound(scope, &inner).unwrap();
+    assert_eq!(
+      inner.instantiate_module_with_feedback(
+        scope,
+        unexpected_module_resolve_callback,
+        &[]
+      ),
+      Some(true)
+    );
+    inner.evaluate(scope).unwrap();
+    if fail {
+      let message = v8::String::new(scope, "link failure").unwrap();
+      scope.throw_exception(message.into());
+      return None;
+    }
+    Some(result)
+  }
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let root_code = create_unbound_module_script(
+    scope,
+    "import { hot } from 'dep'; export function add(n) { return n + 10; } export function result() { return hot(); } export const initial = await Promise.resolve(11);",
+    None,
+  );
+  let dep_code = create_unbound_module_script(
+    scope,
+    "import { add } from 'root'; let count = 0; export function hot() { return add(++count); }",
+    None,
+  );
+  let mut tokens = None;
+  for generation in 0..5 {
+    let root =
+      v8::script_compiler::compile_module_from_unbound(scope, &root_code)
+        .unwrap();
+    let dep =
+      v8::script_compiler::compile_module_from_unbound(scope, &dep_code)
+        .unwrap();
+    let root_global = v8::Global::new(scope, root);
+    let dep_global = v8::Global::new(scope, dep);
+    scope.set_slot(Modules {
+      root: root_global,
+      dep: dep_global,
+      fail: generation == 2,
+    });
+    let entries = tokens
+      .map(|(root_token, dep_token)| {
+        vec![
+          v8::ModuleFeedbackEntry {
+            module: root,
+            feedback: root_token,
+          },
+          v8::ModuleFeedbackEntry {
+            module: dep,
+            feedback: dep_token,
+          },
+        ]
+      })
+      .unwrap_or_default();
+    {
+      v8::tc_scope!(tc, scope);
+      let result = root.instantiate_module_with_feedback(tc, resolve, &entries);
+      if generation == 2 {
+        assert_eq!(result, None);
+        assert!(tc.has_caught());
+      } else {
+        assert_eq!(result, Some(true));
+        root.evaluate(tc).unwrap();
+        tc.perform_microtask_checkpoint();
+        assert_eq!(root.get_status(), v8::ModuleStatus::Evaluated);
+        let name = v8::String::new(tc, "current").unwrap();
+        context
+          .global(tc)
+          .set(tc, name.into(), root.get_module_namespace())
+          .unwrap();
+        assert!(eval(tc, "current.initial === 11 && current.result() === 11 && current.result() === 12").unwrap().is_true());
+        if tokens.is_none() {
+          tokens = Some((
+            v8::script_compiler::capture_module_feedback(tc, &root).unwrap(),
+            v8::script_compiler::capture_module_feedback(tc, &dep).unwrap(),
+          ));
+        }
+      }
+    }
+    // A subsequent ordinary call must not observe a dangling stack provider.
+    let ordinary =
+      create_unbound_module_script(scope, "export const value = 1;", None);
+    let ordinary =
+      v8::script_compiler::compile_module_from_unbound(scope, &ordinary)
+        .unwrap();
+    assert_eq!(
+      ordinary.instantiate_module(scope, unexpected_module_resolve_callback),
+      Some(true)
+    );
+    ordinary.evaluate(scope).unwrap();
+    scope.remove_slot::<Modules>();
+  }
 }

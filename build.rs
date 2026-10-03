@@ -56,9 +56,16 @@ fn main() {
   if env_bool("RUSTY_V8_MULTIPLE_ISOLATE_GROUPS") {
     println!("cargo:rustc-cfg=rusty_v8_multiple_isolate_groups");
   }
+  println!("cargo:rustc-check-cfg=cfg(rusty_v8_module_feedback)");
+  println!("cargo:rerun-if-env-changed=RUSTY_V8_MODULE_FEEDBACK");
+  if env_bool("RUSTY_V8_MODULE_FEEDBACK") {
+    println!("cargo:rustc-cfg=rusty_v8_module_feedback");
+  }
   println!("cargo:rerun-if-changed=.gn");
   println!("cargo:rerun-if-changed=BUILD.gn");
   println!("cargo:rerun-if-changed=src/binding.cc");
+  println!("cargo:rerun-if-changed=src/hotrod-module-feedback.h");
+  println!("cargo:rerun-if-changed=patches/module-feedback-hook.patch");
 
   // These are all the environment variables that we check. This is
   // probably more than what is needed, but missing an important
@@ -150,6 +157,7 @@ fn main() {
       env::set_var("PYTHONDONTWRITEBYTECODE", "1");
     }
 
+    apply_module_feedback_hook_patch();
     build_v8(is_asan);
     build_binding();
 
@@ -159,6 +167,37 @@ fn main() {
   print_prebuilt_src_binding_path();
 
   download_static_lib_binaries();
+}
+
+fn apply_module_feedback_hook_patch() {
+  let patch = "patches/module-feedback-hook.patch";
+  let check = |reverse: bool| {
+    let mut command = Command::new("git");
+    command.args(["apply", "--check"]);
+    if reverse {
+      command.arg("--reverse");
+    }
+    command
+      .arg(patch)
+      .output()
+      .expect("check module feedback hook patch")
+  };
+  if check(true).status.success() {
+    return;
+  }
+  let result = check(false);
+  assert!(
+    result.status.success(),
+    "V8 feedback hook patch does not match: {}",
+    String::from_utf8_lossy(&result.stderr)
+  );
+  assert!(
+    Command::new("git")
+      .args(["apply", patch])
+      .status()
+      .expect("apply module feedback hook patch")
+      .success()
+  );
 }
 
 fn acquire_lock() -> LockFile {

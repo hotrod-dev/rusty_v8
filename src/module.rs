@@ -7,6 +7,7 @@ use crate::FixedArray;
 use crate::Local;
 use crate::Message;
 use crate::Module;
+use crate::ModuleFeedback;
 use crate::ModuleRequest;
 use crate::Object;
 use crate::String;
@@ -236,6 +237,14 @@ unsafe extern "C" {
     cb: ResolveModuleCallback,
     source_callback: Option<ResolveSourceCallback>,
   ) -> MaybeBool;
+  #[cfg(rusty_v8_module_feedback)]
+  fn v8__Module__InstantiateModuleWithFeedback(
+    this: *const Module,
+    context: *const Context,
+    cb: ResolveModuleCallback,
+    entries: *const ModuleFeedbackEntry,
+    count: usize,
+  ) -> MaybeBool;
   fn v8__Module__Evaluate(
     this: *const Module,
     context: *const Context,
@@ -317,7 +326,40 @@ pub enum ModuleStatus {
   Errored,
 }
 
+/// Rooted module/feedback pairs valid only for one instantiation call.
+#[repr(C)]
+#[derive(Debug)]
+pub struct ModuleFeedbackEntry<'s> {
+  pub module: Local<'s, Module>,
+  pub feedback: Local<'s, ModuleFeedback>,
+}
+
 impl Module {
+  /// Instantiate with optional feedback for exact script/native-context matches.
+  /// This does not retain entries or change the module's serialized layout.
+  pub fn instantiate_module_with_feedback<'s>(
+    &self,
+    scope: &PinScope<'s, '_>,
+    callback: impl MapFnTo<ResolveModuleCallback<'s>>,
+    entries: &[ModuleFeedbackEntry<'s>],
+  ) -> Option<bool> {
+    #[cfg(not(rusty_v8_module_feedback))]
+    {
+      let _ = entries;
+      self.instantiate_module(scope, callback)
+    }
+    #[cfg(rusty_v8_module_feedback)]
+    unsafe {
+      v8__Module__InstantiateModuleWithFeedback(
+        self,
+        &*scope.get_current_context(),
+        callback.map_fn_to(),
+        entries.as_ptr(),
+        entries.len(),
+      )
+      .into()
+    }
+  }
   /// Returns the module's current status.
   #[inline(always)]
   pub fn get_status(&self) -> ModuleStatus {

@@ -30,7 +30,9 @@
 #include "v8/src/flags/flags.h"
 #include "v8/src/libplatform/default-platform.h"
 #include "v8/src/api/api-inl.h"
-#include "v8/src/objects/source-text-module.h"
+#include "v8/src/objects/source-text-module-inl.h"
+#include "src/hotrod-module-feedback.h"
+#include <unordered_map>
 
 using namespace support;
 
@@ -688,6 +690,25 @@ const v8::Module* v8__ScriptCompiler__CompileModuleFromUnbound(
   auto* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   auto module = i_isolate->factory()->NewSourceTextModule(shared);
   return local_to_ptr(v8::Utils::ToLocal(i::Cast<i::Module>(module)));
+}
+
+const v8::FixedArray* v8__ScriptCompiler__CaptureModuleFeedback(
+    v8::Isolate* isolate, const v8::Module* module) {
+  auto* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  auto raw = v8::Utils::OpenDirectHandle(ptr_to_local(module).operator->());
+  if (!i::IsSourceTextModule(*raw)) return nullptr;
+  auto source = i::Cast<i::SourceTextModule>(raw);
+  if (source->status() < i::Module::kLinked ||
+      source->status() == i::Module::kErrored) return nullptr;
+  auto function = i::direct_handle(
+      i::Cast<i::JSGeneratorObject>(source->code())->function(), i_isolate);
+  auto cell = i::direct_handle(function->raw_feedback_cell(), i_isolate);
+  if (*cell == *i_isolate->factory()->many_closures_cell()) return nullptr;
+  auto token = i_isolate->factory()->NewFixedArray(3);
+  token->set(0, function->shared());
+  token->set(1, function->native_context());
+  token->set(2, *cell);
+  return local_to_ptr(v8::Utils::FixedArrayToLocal(token));
 }
 
 const v8::Script* v8__ScriptCompiler__Compile(
@@ -3922,6 +3943,59 @@ int v8__Module__ScriptId(const v8::Module& self) {
   // TODO(bnoordhuis) Open V8 CL to mark Module::ScriptId() and
   // UnboundScript::GetId() const.
   return const_cast<v8::Module&>(self).ScriptId();
+}
+
+struct hotrod_feedback_entry_t {
+  const v8::Module* module;
+  const v8::FixedArray* feedback;
+};
+
+// Handle cells in entries remain rooted in the caller's HandleScope. Hash
+// collisions are checked against module identity; moving GC cannot stale keys.
+struct HotrodFeedbackProvider {
+  i::Isolate* isolate;
+  std::unordered_multimap<int, hotrod_feedback_entry_t> entries;
+  static i::Tagged<i::FeedbackCell> Lookup(
+      i::Isolate* isolate, i::Tagged<i::SourceTextModule> module, void* data) {
+    auto& self = *static_cast<HotrodFeedbackProvider*>(data);
+    if (self.isolate != isolate) return {};
+    auto local = v8::Utils::ToLocal(i::direct_handle(i::Cast<i::Module>(module), isolate));
+    auto range = self.entries.equal_range(local->GetIdentityHash());
+    for (auto it = range.first; it != range.second; ++it) {
+      const auto& entry = it->second;
+      if (ptr_to_local(entry.module) != local) continue;
+      auto token = v8::Utils::OpenDirectHandle(ptr_to_local(entry.feedback).operator->());
+      if (token->ulength().value() == 3 && token->get(0) == module->code() &&
+          token->get(1) == isolate->raw_native_context() &&
+          i::IsFeedbackCell(token->get(2))) {
+        return i::Cast<i::FeedbackCell>(token->get(2));
+      }
+    }
+    return {};
+  }
+};
+
+struct HotrodFeedbackScope {
+  i::HotrodModuleFeedbackState previous;
+  explicit HotrodFeedbackScope(HotrodFeedbackProvider* provider)
+      : previous(i::ExchangeHotrodModuleFeedback(
+            {HotrodFeedbackProvider::Lookup, provider})) {}
+  ~HotrodFeedbackScope() { i::ExchangeHotrodModuleFeedback(previous); }
+};
+
+MaybeBool v8__Module__InstantiateModuleWithFeedback(
+    const v8::Module& self, const v8::Context& context,
+    v8::Module::ResolveModuleCallback cb,
+    const hotrod_feedback_entry_t* entries, size_t count) {
+  auto* isolate = v8::Isolate::GetCurrent();
+  HotrodFeedbackProvider provider{reinterpret_cast<i::Isolate*>(isolate), {}};
+  provider.entries.reserve(count);
+  for (size_t n = 0; n < count; ++n) {
+    provider.entries.emplace(ptr_to_local(entries[n].module)->GetIdentityHash(), entries[n]);
+  }
+  HotrodFeedbackScope feedback_scope(&provider);
+  return maybe_to_maybe_bool(ptr_to_local(&self)->InstantiateModule(
+      ptr_to_local(&context), cb, nullptr));
 }
 
 MaybeBool v8__Module__InstantiateModule(

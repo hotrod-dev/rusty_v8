@@ -1,0 +1,41 @@
+--- a/v8/src/objects/source-text-module.cc
++++ b/v8/src/objects/source-text-module.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/objects/source-text-module.h"
++#include "src/hotrod-module-feedback.h"
+ 
+ #include "src/api/api-inl.h"
+ #include "src/ast/modules.h"
+@@ -16,6 +17,14 @@
+ 
+ namespace v8 {
+ namespace internal {
++namespace {
++thread_local HotrodModuleFeedbackState hotrod_feedback_state{nullptr, nullptr};
++}
++HotrodModuleFeedbackState ExchangeHotrodModuleFeedback(HotrodModuleFeedbackState next) {
++  auto previous = hotrod_feedback_state;
++  hotrod_feedback_state = next;
++  return previous;
++}
+ 
+ struct StringHandleHash {
+   V8_INLINE size_t operator()(DirectHandle<String> string) const {
+@@ -609,9 +618,12 @@
+   // the recursion.
+   DirectHandle<SharedFunctionInfo> shared(
+       Cast<SharedFunctionInfo>(module->code()), isolate);
+-  DirectHandle<JSFunction> function =
+-      Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
+-          .Build();
++  Factory::JSFunctionBuilder builder{isolate, shared, isolate->native_context()};
++  if (hotrod_feedback_state.provider) {
++    auto cell = hotrod_feedback_state.provider(isolate, *module, hotrod_feedback_state.data);
++    if (!cell.is_null()) builder.set_feedback_cell(direct_handle(cell, isolate));
++  }
++  DirectHandle<JSFunction> function = builder.Build();
+   module->set_code(*function);
+   module->SetStatus(kLinking);
+   module->set_dfs_index(*dfs_index);

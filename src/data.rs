@@ -300,6 +300,7 @@ impl_from! { Template for Data }
 impl_from! { FunctionTemplate for Data }
 impl_from! { ObjectTemplate for Data }
 impl_from! { UnboundModuleScript for Data }
+impl_from! { ModuleFeedback for Data }
 impl_from! { UnboundScript for Data }
 impl_from! { Value for Data }
 impl_from! { External for Data }
@@ -358,6 +359,7 @@ impl_partial_eq! { Template for Data use identity }
 impl_partial_eq! { FunctionTemplate for Data use identity }
 impl_partial_eq! { ObjectTemplate for Data use identity }
 impl_partial_eq! { UnboundModuleScript for Data use identity }
+impl_partial_eq! { ModuleFeedback for Data use identity }
 impl_partial_eq! { External for Data use identity }
 impl_partial_eq! { Object for Data use identity }
 impl_partial_eq! { Array for Data use identity }
@@ -696,6 +698,17 @@ impl_deref! { Data for UnboundModuleScript }
 impl_eq! { for UnboundModuleScript }
 impl_partial_eq! { Data for UnboundModuleScript use identity }
 impl_partial_eq! { UnboundModuleScript for UnboundModuleScript use identity }
+
+/// Opaque execution feedback for one module script and native Context.
+/// Contains no module instance; rebinding still creates fresh module variables.
+#[repr(C)]
+#[derive(Debug)]
+pub struct ModuleFeedback(Opaque);
+
+impl_deref! { Data for ModuleFeedback }
+impl_eq! { for ModuleFeedback }
+impl_partial_eq! { Data for ModuleFeedback use identity }
+impl_partial_eq! { ModuleFeedback for ModuleFeedback use identity }
 
 /// A compiled JavaScript script, not yet tied to a Context.
 #[repr(C)]

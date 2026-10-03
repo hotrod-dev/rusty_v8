@@ -4,6 +4,7 @@ use std::{marker::PhantomData, mem::MaybeUninit};
 use crate::Function;
 use crate::Local;
 use crate::Module;
+use crate::ModuleFeedback;
 use crate::Object;
 use crate::ScriptOrigin;
 use crate::String;
@@ -65,6 +66,11 @@ unsafe extern "C" {
     unbound_module_script: *const UnboundModuleScript,
   ) -> *const Module;
 
+  #[cfg(rusty_v8_module_feedback)]
+  fn v8__ScriptCompiler__CaptureModuleFeedback(
+    isolate: *mut RealIsolate,
+    module: *const Module,
+  ) -> *const ModuleFeedback;
   fn v8__ScriptCompiler__CachedDataVersionTag() -> u32;
 }
 
@@ -301,6 +307,26 @@ pub fn compile_module_from_unbound<'s>(
         sd.get_isolate_ptr(),
         unbound_module_script,
       )
+    })
+  }
+}
+
+/// Capture feedback after module instantiation. The token is isolate-bound and
+/// usable only with the same script and native context. Returns None when no
+/// reusable feedback exists, or when the native archive lacks this extension.
+pub fn capture_module_feedback<'s>(
+  scope: &PinScope<'s, '_>,
+  module: &Module,
+) -> Option<Local<'s, ModuleFeedback>> {
+  #[cfg(not(rusty_v8_module_feedback))]
+  {
+    let _ = (scope, module);
+    None
+  }
+  #[cfg(rusty_v8_module_feedback)]
+  unsafe {
+    scope.cast_local(|sd| {
+      v8__ScriptCompiler__CaptureModuleFeedback(sd.get_isolate_ptr(), module)
     })
   }
 }
