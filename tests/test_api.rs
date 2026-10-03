@@ -16208,3 +16208,32 @@ fn object_call_as_function_with_context() {
     );
   }
 }
+
+#[test]
+fn isolate_in_new_group() {
+  let _setup_guard = setup::parallel_test();
+  // Each thread creates and destroys a group independently. Exercise allocation,
+  // compiled code and GC so the test covers more than successful construction.
+  std::thread::scope(|threads| {
+    for _ in 0..4 {
+      threads.spawn(|| {
+        let isolate = v8::Isolate::new_in_new_group(Default::default());
+        #[cfg(not(rusty_v8_multiple_isolate_groups))]
+        assert!(isolate.is_none());
+        #[cfg(rusty_v8_multiple_isolate_groups)]
+        {
+          let mut isolate = isolate.expect("native archive must support multiple groups");
+          v8::scope!(let scope, &mut isolate);
+          let context = v8::Context::new(scope, Default::default());
+          let scope = &mut v8::ContextScope::new(scope, context);
+          let source = v8::String::new(scope,
+            "const a = Array.from({length: 10000}, (_, i) => ({i})); gc(); a.reduce((n, x) => n + x.i, 0)"
+          ).unwrap();
+          let script = v8::Script::compile(scope, source, None).unwrap();
+          let result = script.run(scope).unwrap();
+          assert_eq!(result.integer_value(scope), Some(49_995_000));
+        }
+      });
+    }
+  });
+}

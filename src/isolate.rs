@@ -672,6 +672,10 @@ pub type UseCounterCallback =
 
 unsafe extern "C" {
   fn v8__Isolate__New(params: *const raw::CreateParams) -> *mut RealIsolate;
+  #[cfg(rusty_v8_multiple_isolate_groups)]
+  fn v8__Isolate__NewInNewGroup(
+    params: *const raw::CreateParams,
+  ) -> *mut RealIsolate;
   fn v8__Isolate__Dispose(this: *mut RealIsolate);
   fn v8__Isolate__GetNumberOfDataSlots(this: *const RealIsolate) -> u32;
   fn v8__Isolate__GetData(
@@ -996,15 +1000,21 @@ impl Isolate {
     )
   }
 
-  fn new_impl(params: CreateParams) -> *mut RealIsolate {
+  fn new_impl(
+    params: CreateParams,
+    create: unsafe extern "C" fn(*const raw::CreateParams) -> *mut RealIsolate,
+  ) -> Option<*mut RealIsolate> {
     crate::V8::assert_initialized();
     let (raw_create_params, create_param_allocations) = params.finalize();
     let has_embedder_cpp_heap = !raw_create_params.cpp_heap.is_null();
-    let cxx_isolate = unsafe { v8__Isolate__New(&raw_create_params) };
+    let cxx_isolate = unsafe { create(&raw_create_params) };
+    if cxx_isolate.is_null() {
+      return None;
+    }
     let mut isolate = unsafe { Isolate::from_raw_ptr(cxx_isolate) };
     isolate.initialize(create_param_allocations);
     isolate.get_annex_mut().has_embedder_cpp_heap = has_embedder_cpp_heap;
-    cxx_isolate
+    Some(cxx_isolate)
   }
 
   pub(crate) fn initialize(&mut self, create_param_allocations: Box<dyn Any>) {
@@ -1021,7 +1031,30 @@ impl Isolate {
   /// V8::initialize() must have run prior to this.
   #[allow(clippy::new_ret_no_self)]
   pub fn new(params: CreateParams) -> OwnedIsolate {
-    OwnedIsolate::new(Self::new_impl(params))
+    OwnedIsolate::new(
+      Self::new_impl(params, v8__Isolate__New)
+        .expect("V8 failed to create isolate"),
+    )
+  }
+
+  /// Creates an isolate in its own group, with an independent pointer-compression
+  /// cage. Unlike the default group, its 4 GB compressed heap limit is not shared
+  /// with other isolates. Shared JavaScript objects cannot cross group boundaries.
+  ///
+  /// Returns `None` if the native library does not support multiple groups or the
+  /// bindings were built without `RUSTY_V8_MULTIPLE_ISOLATE_GROUPS=1`. This opt-in
+  /// requires a matching native archive built from this fork; stock archives do
+  /// not expose the additional entry point. V8 must already be initialized.
+  pub fn new_in_new_group(params: CreateParams) -> Option<OwnedIsolate> {
+    #[cfg(rusty_v8_multiple_isolate_groups)]
+    {
+      Self::new_impl(params, v8__Isolate__NewInNewGroup).map(OwnedIsolate::new)
+    }
+    #[cfg(not(rusty_v8_multiple_isolate_groups))]
+    {
+      let _ = params;
+      None
+    }
   }
 
   #[allow(clippy::new_ret_no_self)]
