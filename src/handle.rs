@@ -1006,7 +1006,7 @@ impl<T> Weak<T> {
         None
       } else {
         assert!(!data.weak_dropped.get());
-        Some(unsafe { NonNull::new_unchecked(Box::into_raw(data)) })
+        Some(Box::into_non_null(data))
       }
     } else {
       None
