@@ -1,0 +1,214 @@
+[
+  [
+    "missing",
+    "<undefined>"
+  ],
+  [
+    "added",
+    42
+  ],
+  [
+    "deleted",
+    "<undefined>"
+  ],
+  [
+    "inherited data",
+    9
+  ],
+  [
+    "inherited missing",
+    "<undefined>"
+  ],
+  [
+    "prototype add",
+    7
+  ],
+  [
+    "prototype delete",
+    "<undefined>"
+  ],
+  [
+    "prototype replacement",
+    8
+  ],
+  [
+    "null prototype",
+    "<undefined>"
+  ],
+  [
+    "getter receiver",
+    31
+  ],
+  [
+    "getter calls",
+    1
+  ],
+  [
+    "own undefined getter",
+    "<undefined>"
+  ],
+  [
+    "getter calls after own",
+    2
+  ],
+  [
+    "revealed getter",
+    31
+  ],
+  [
+    "getter calls after delete",
+    3
+  ],
+  [
+    "throwing getter",
+    "<throw>",
+    "Error",
+    "getter failure"
+  ],
+  [
+    "throwing getter calls",
+    4
+  ],
+  [
+    "setter only",
+    "<undefined>"
+  ],
+  [
+    "proxy in chain",
+    19
+  ],
+  [
+    "proxy events",
+    [
+      [
+        "get",
+        "selected",
+        true
+      ]
+    ]
+  ],
+  [
+    "revoked proxy",
+    "TypeError"
+  ],
+  [
+    "inherited symbol",
+    23
+  ],
+  [
+    "deleted symbol",
+    "<undefined>"
+  ],
+  [
+    "key coercion",
+    31
+  ],
+  [
+    "key coercion count",
+    1
+  ],
+  [
+    "typed own 0",
+    11
+  ],
+  [
+    "typed prototype 0",
+    11
+  ],
+  [
+    "typed own 1",
+    12
+  ],
+  [
+    "typed prototype 1",
+    12
+  ],
+  [
+    "typed own 2",
+    "<undefined>"
+  ],
+  [
+    "typed prototype 2",
+    "<undefined>"
+  ],
+  [
+    "typed own -0",
+    "<undefined>"
+  ],
+  [
+    "typed prototype -0",
+    "<undefined>"
+  ],
+  [
+    "typed own NaN",
+    "<undefined>"
+  ],
+  [
+    "typed prototype NaN",
+    "<undefined>"
+  ],
+  [
+    "typed own Infinity",
+    "<undefined>"
+  ],
+  [
+    "typed prototype Infinity",
+    "<undefined>"
+  ],
+  [
+    "typed own 1.5",
+    "<undefined>"
+  ],
+  [
+    "typed prototype 1.5",
+    "<undefined>"
+  ],
+  [
+    "typed own selected",
+    "<undefined>"
+  ],
+  [
+    "typed prototype selected",
+    "<undefined>"
+  ],
+  [
+    "dictionary inherited",
+    170
+  ],
+  [
+    "dictionary absent",
+    "<undefined>"
+  ],
+  [
+    "dictionary added",
+    13
+  ],
+  [
+    "private field",
+    51
+  ],
+  [
+    "private brand",
+    "TypeError"
+  ],
+  [
+    "frozen absent",
+    "<undefined>"
+  ],
+  [
+    "unusual missing 0",
+    "<undefined>"
+  ],
+  [
+    "unusual missing 1",
+    "<undefined>"
+  ],
+  [
+    "unusual missing 1500",
+    "<undefined>"
+  ],
+  [
+    "intern table intact",
+    64
+  ]
+]

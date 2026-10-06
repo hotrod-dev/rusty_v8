@@ -1,0 +1,36 @@
+--- a/v8/src/ic/accessor-assembler.cc
++++ b/v8/src/ic/accessor-assembler.cc
+@@ -3138,8 +3138,31 @@
+ 
+       BIND(&stub_cache_miss);
+       {
+-        // TODO(jkummerow): Check if the property exists on the prototype
+-        // chain. If it doesn't, then there's no point in missing.
++        // Avoid an IC miss when the property is absent from the prototype
++        // chain. Found properties and exotic receivers still use the runtime
++        // so accessors and normal handler installation retain their semantics.
++        Label runtime_miss(this), return_undefined(this);
++        TVARIABLE(Map, holder_map, lookup_start_object_map);
++        Label loop(this, &holder_map);
++        GotoIf(IsPrivateSymbol(name), &runtime_miss);
++        Goto(&loop);
++        BIND(&loop);
++        {
++          GotoIf(IsJSTypedArrayInstanceType(LoadMapInstanceType(
++                     holder_map.value())), &runtime_miss);
++          TNode<HeapObject> proto = LoadMapPrototype(holder_map.value());
++          GotoIf(IsNull(proto), &return_undefined);
++          TNode<Map> proto_map = LoadMap(proto);
++          Label next_proto(this);
++          TryHasOwnProperty(proto, proto_map, LoadMapInstanceType(proto_map),
++                            name, &runtime_miss, &next_proto, &runtime_miss);
++          BIND(&next_proto);
++          holder_map = proto_map;
++          Goto(&loop);
++        }
++        BIND(&return_undefined);
++        Return(UndefinedConstant());
++        BIND(&runtime_miss);
+         Comment("KeyedLoadGeneric_miss");
+         TailCallRuntime(Runtime::kKeyedLoadIC_Miss, p->context(),
+                         p->receiver_and_lookup_start_object(), name, p->slot(),

@@ -66,6 +66,7 @@ fn main() {
   println!("cargo:rerun-if-changed=src/binding.cc");
   println!("cargo:rerun-if-changed=src/hotrod-module-feedback.h");
   println!("cargo:rerun-if-changed=patches/module-feedback-hook.patch");
+  println!("cargo:rerun-if-changed=patches/keyed-negative-lookup.patch");
 
   // These are all the environment variables that we check. This is
   // probably more than what is needed, but missing an important
@@ -157,7 +158,8 @@ fn main() {
       env::set_var("PYTHONDONTWRITEBYTECODE", "1");
     }
 
-    apply_module_feedback_hook_patch();
+    apply_v8_patch("patches/module-feedback-hook.patch");
+    apply_v8_patch("patches/keyed-negative-lookup.patch");
     build_v8(is_asan);
     build_binding();
 
@@ -169,18 +171,14 @@ fn main() {
   download_static_lib_binaries();
 }
 
-fn apply_module_feedback_hook_patch() {
-  let patch = "patches/module-feedback-hook.patch";
+fn apply_v8_patch(patch: &str) {
   let check = |reverse: bool| {
     let mut command = Command::new("git");
     command.args(["apply", "--check"]);
     if reverse {
       command.arg("--reverse");
     }
-    command
-      .arg(patch)
-      .output()
-      .expect("check module feedback hook patch")
+    command.arg(patch).output().expect("check V8 source patch")
   };
   if check(true).status.success() {
     return;
@@ -188,14 +186,14 @@ fn apply_module_feedback_hook_patch() {
   let result = check(false);
   assert!(
     result.status.success(),
-    "V8 feedback hook patch does not match: {}",
+    "V8 source patch {patch} does not match: {}",
     String::from_utf8_lossy(&result.stderr)
   );
   assert!(
     Command::new("git")
       .args(["apply", patch])
       .status()
-      .expect("apply module feedback hook patch")
+      .expect("apply V8 source patch")
       .success()
   );
 }

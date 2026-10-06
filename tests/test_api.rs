@@ -16611,3 +16611,133 @@ fn module_feedback_hook_restores_nested_linking_and_errors() {
     scope.remove_slot::<Modules>();
   }
 }
+
+#[test]
+fn keyed_lookup_missing_property_semantics_across_realms_and_gc() {
+  let _setup_guard = setup::parallel_test();
+  let corpus = include_str!("fixtures/keyed-negative-lookup/corpus.js");
+  let oracle = include_str!("fixtures/keyed-negative-lookup/expected.json");
+  fn lookup_probe_eval<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    code: &str,
+  ) -> v8::Local<'s, v8::Value> {
+    let source = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    script.run(scope).expect("JavaScript probe threw")
+  }
+  for _group in 0..2 {
+    let mut isolate = v8::Isolate::new_in_new_group(Default::default())
+      .unwrap_or_else(|| v8::Isolate::new(Default::default()));
+    let (context, foreign) = {
+      v8::scope!(let scope, &mut isolate);
+      let context = v8::Context::new(scope, Default::default());
+      let context = v8::Global::new(scope, context);
+      let other = v8::Context::new(scope, Default::default());
+      let scope = &mut v8::ContextScope::new(scope, other);
+      let foreign = lookup_probe_eval(
+        scope,
+        r#"(() => {
+                const parent = { stable: 17 };
+                let calls = 0;
+                Object.defineProperty(parent, 'getter', {
+                    get() { calls++; return this.own; }, configurable: true
+                });
+                const child = Object.create(parent);
+                child.own = 29;
+                const proxyChild = Object.create(new Proxy({}, {
+                    get(target, key, receiver) {
+                        if (receiver !== proxyChild) throw Error('wrong proxy receiver');
+                        return key === 'missing' ? 37 : 41;
+                    },
+                    getOwnPropertyDescriptor() { throw Error('unexpected descriptor trap'); },
+                    getPrototypeOf() { throw Error('unexpected prototype trap'); }
+                }));
+                return {child, parent, proxyChild, calls: () => calls};
+            })()"#,
+      );
+      (context, v8::Global::new(scope, foreign))
+    };
+    {
+      v8::scope!(let scope, &mut isolate);
+      let context = v8::Local::new(scope, &context);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      let key = v8::String::new(scope, "foreign").unwrap();
+      let foreign = v8::Local::new(scope, &foreign);
+      assert_eq!(
+        context.global(scope).set(scope, key.into(), foreign),
+        Some(true)
+      );
+      // A native interceptor in the prototype chain must retain the runtime
+      // path just like a JavaScript Proxy; absence cannot be assumed here.
+      let template = v8::ObjectTemplate::new(scope);
+      template.set_named_property_handler(
+        v8::NamedPropertyHandlerConfiguration::new().getter(
+          |_scope: &mut v8::PinScope,
+           _key: v8::Local<v8::Name>,
+           _args: v8::PropertyCallbackArguments,
+           mut rv: v8::ReturnValue<v8::Value>| {
+            rv.set_int32(77);
+            v8::Intercepted::kYes
+          },
+        ),
+      );
+      let intercepted = template.new_instance(scope).unwrap();
+      let key = v8::String::new(scope, "nativeInterceptor").unwrap();
+      assert_eq!(
+        context
+          .global(scope)
+          .set(scope, key.into(), intercepted.into()),
+        Some(true)
+      );
+      let script = format!(
+        "globalThis.module = {{exports: {{}}}};\n{corpus}\nglobalThis.expected = {oracle};"
+      );
+      lookup_probe_eval(scope, &script);
+      lookup_probe_eval(
+        scope,
+        r#"
+                globalThis.nativeChild = Object.create(nativeInterceptor);
+                Object.defineProperty(nativeChild, "own", {value: 29});
+                globalThis.read = function read(object, key) { return object[key]; };
+                const shapes = Array.from({length: 32}, (_, i) => ({['shape' + i]: i}));
+                const names = Array.from({length: 64}, (_, i) => 'missing_' + i);
+                Object.fromEntries(names.map(x => [x, 0]));
+                for (let i = 0; i < 32000; i++) read(shapes[i & 31], names[i & 63]);
+                globalThis.probe = function probe(iteration) {
+                    function check(actual, expected) {
+                        if (actual !== expected) throw Error('got ' + actual + ' expected ' + expected);
+                    }
+                    check(read(nativeChild, 'missing'), 77);
+                    check(read(nativeChild, 'own'), 29);
+                    check(read(foreign.child, 'missing'), undefined);
+                    foreign.parent.missing = iteration;
+                    check(read(foreign.child, 'missing'), iteration);
+                    delete foreign.parent.missing;
+                    check(read(foreign.child, 'missing'), undefined);
+                    check(read(foreign.child, 'stable'), 17);
+                    check(read(foreign.child, 'getter'), 29);
+                    check(foreign.calls(), iteration + 1);
+                    check(read(foreign.proxyChild, 'missing'), 37);
+                    Object.setPrototypeOf(foreign.child, {replacement: iteration});
+                    check(read(foreign.child, 'replacement'), iteration);
+                    check(read(foreign.child, 'stable'), undefined);
+                    Object.setPrototypeOf(foreign.child, foreign.parent);
+                    check(JSON.stringify(module.exports()), JSON.stringify(expected));
+                    return true;
+                };
+            "#,
+      );
+    }
+    for iteration in 0..20 {
+      isolate.low_memory_notification();
+      v8::scope!(let scope, &mut isolate);
+      let context = v8::Local::new(scope, &context);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      assert!(
+        lookup_probe_eval(scope, &format!("probe({iteration})")).is_true()
+      );
+    }
+    drop(foreign);
+    drop(context);
+  }
+}

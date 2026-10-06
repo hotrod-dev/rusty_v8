@@ -206,6 +206,22 @@ file cannot be fetched (for example, the configured mirror does not carry it)
 but a previously downloaded binding exists on disk, that file is reused with
 a warning instead of failing the build.
 
+## Hotrod source patches
+
+This fork applies the patches in `patches/` before a `V8_FROM_SOURCE` build.
+The module feedback patch supplies the scoped feedback-reuse API. The keyed
+lookup patch avoids entering the runtime after a fast-property/stub-cache miss
+when the property is absent from the prototype chain. It checks the current
+chain on every access; existing properties, private names, typed arrays, and
+exotic receivers retain the normal runtime path.
+
+The keyed lookup change adds no native API or snapshot-format change, but a
+prebuilt archive must be rebuilt to include it. Merely updating the Rust crate
+while supplying an older `RUSTY_V8_ARCHIVE` does not enable the optimization.
+The `keyed_lookup_missing_property_semantics_across_realms_and_gc` API test
+covers observable property semantics, prototype changes, and repeated GC across
+realms and isolates. Its expected results were also checked against Node 24.16.0.
+
 ## Build V8 from Source
 
 Use `V8_FROM_SOURCE=1 cargo build -vv` to build the crate completely from
